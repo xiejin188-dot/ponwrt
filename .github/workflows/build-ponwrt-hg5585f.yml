@@ -1,0 +1,98 @@
+name: Build PonWrt HG5585F-CT
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-hg5585f-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+
+      - name: 安装官方编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+
+      - name: 缓存 dl 源码包
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: ponwrt-dl-hg5585f-${{ hashFiles('feeds.conf.default', 'configs/an7581.config') }}
+          restore-keys: |
+            ponwrt-dl-hg5585f-
+
+      - name: 更新并安装 feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 加载配置（仅 HG5585F-CT）
+        run: |
+          ./scripts/kconfig.pl + \
+            configs/an7581.config \
+            configs/release.config > .config
+          
+          # 限定仅编译 HG5585F-CT
+          echo 'CONFIG_TARGET_PROFILE="fiberhome_hg5585f-ct"' >> .config
+          echo 'CONFIG_TARGET_PROFILE_FIBERHOME_HG5585F_CT=y' >> .config
+          echo 'CONFIG_CCACHE=y' >> .config
+          
+          make olddefconfig
+
+      - name: 预下载全部源码
+        run: make download -j"$(nproc)"
+
+      - name: 编译固件
+        run: make -j"$(nproc)" V=s 2>&1 | tee build.log
+
+      - name: 生成 SHA256 校验
+        if: success()
+        run: |
+          sha256sum bin/targets/airoha/an7581/*-hg5585f-ct-*.itb > firmware-sha256.txt
+
+      - name: 上传固件产物
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5585F-CT
+          path: |
+            bin/targets/airoha/an7581/*-hg5585f-ct-*.itb
+            .config
+            firmware-sha256.txt
+          retention-days: 7
+
+      - name: 编译失败 → 打印末尾日志
+        if: failure()
+        run: |
+          echo "==================== 编译报错日志 ===================="
+          tail -n 200 build.log
+
+      - name: 编译失败 → 启动 tmate 调试
+        uses: mxschmitt/action-tmate@v3
+        if: failure()
+        timeout-minutes: 60
+        with:
+          limit-access-to-actor: true
